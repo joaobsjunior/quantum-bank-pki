@@ -30,6 +30,8 @@ Scripts:
   `quantum-bank-mobile-client-v1`.
 - `scripts/revoke-local-cert.sh` records a local certificate serial in
   `local-ca/revoked-serials.txt`.
+- `scripts/bootstrap-runtime-certs.sh` generates local server/client runtime
+  certificates and backend PKCS12 stores for the Phase 6 Docker Compose runtime.
 
 Public trust anchors live in `local-ca/trust/`. Private CA keys and generated
 certificate material stay in ignored directories.

@@ -4,6 +4,7 @@ private/
 issued/
 requests/
 tmp/
+runtime/
 *.key
 *.csr
 *.srl
@@ -11,4 +12,3 @@ serial
 serial.old
 index.txt
 index.txt.*
-
