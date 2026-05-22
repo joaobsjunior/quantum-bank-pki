@@ -1,0 +1,2 @@
+# Quantum Bank local revoked certificate serials.
+# One uppercase hexadecimal serial per line.
