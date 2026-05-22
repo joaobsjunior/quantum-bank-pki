@@ -1,0 +1,35 @@
+[ca]
+default_ca = quantum_bank_local_ca
+
+[quantum_bank_local_ca]
+dir = .
+certificate = $dir/trust/issuing-ca.crt
+private_key = $dir/private/issuing-ca.key
+database = $dir/index.txt
+serial = $dir/serial
+new_certs_dir = $dir/issued
+default_md = sha256
+policy = quantum_bank_policy
+copy_extensions = copy
+unique_subject = no
+
+[quantum_bank_policy]
+commonName = supplied
+organizationName = optional
+organizationalUnitName = optional
+countryName = optional
+stateOrProvinceName = optional
+localityName = optional
+
+[root_ca]
+basicConstraints = critical, CA:TRUE, pathlen:1
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[issuing_ca]
+basicConstraints = critical, CA:TRUE, pathlen:0
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+

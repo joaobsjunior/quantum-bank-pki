@@ -1,0 +1,13 @@
+# Generated PKI secret material and OpenSSL state.
+local-ca/private/
+local-ca/issued/
+local-ca/requests/
+local-ca/tmp/
+local-ca/*.key
+local-ca/*.csr
+local-ca/*.srl
+local-ca/serial
+local-ca/serial.old
+local-ca/index.txt
+local-ca/index.txt.*
+

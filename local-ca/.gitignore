@@ -1,0 +1,14 @@
+# Secret and transient local CA material. Public trust anchors under trust/*.crt
+# are intentionally not ignored.
+private/
+issued/
+requests/
+tmp/
+*.key
+*.csr
+*.srl
+serial
+serial.old
+index.txt
+index.txt.*
+
