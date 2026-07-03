@@ -35,3 +35,12 @@ Scripts:
 
 Public trust anchors live in `local-ca/trust/`. Private CA keys and generated
 certificate material stay in ignored directories.
+
+## Testing & CI
+
+- Validate PKI locally: `./scripts/ci-validate.sh` bootstraps the local CA and
+  runs `scripts/verify-trust-anchors.sh`.
+- Negative mTLS tests (`scripts/negative-mtls-tests.sh`) require a running
+  runtime and run in the superproject's opt-in `e2e` job, not the static gate.
+- CI (`.github/workflows/ci.yml`) runs the validation gate on every push/PR to
+  `main`.
