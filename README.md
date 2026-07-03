@@ -47,15 +47,20 @@ certificate material stay in ignored directories.
 
 ## Runtime Requirements
 
-PKI is script-based (Bash + OpenSSL) and is **not** a Compose service — its
-`local-ca/` material is mounted into the backend and gateway containers.
+PKI is **not** a running service — it is a set of Bash + OpenSSL scripts, and its
+`local-ca/` folder is mounted into the backend and gateway containers.
 
-| Resource | Footprint |
+### Recommended configuration
+
+**Nothing to provision.** It only needs:
+
+| Requirement | Recommended |
 | --- | --- |
-| Memory | negligible (short-lived OpenSSL processes) |
-| CPU | negligible (brief spikes during key generation / CSR signing) |
-| Storage | a few MB under `local-ca/` (CA keys, issued certs, runtime PKCS12 stores) |
+| Tooling | **`openssl`** available on the host |
+| Memory / CPU | negligible (only brief spikes during key generation / CSR signing) |
+| Disk | **a few MB** under `local-ca/` (CA keys, issued certs, PKCS12 stores) |
 
-- Requires `openssl` on the host (or runs inside the mounted container context).
-- Private keys and generated certs stay in ignored directories; only public
-  trust anchors under `local-ca/trust/` are tracked.
+### Good to know
+
+- Private keys and issued certs live in ignored folders; only the public trust
+  anchors under `local-ca/trust/` are tracked.
