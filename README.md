@@ -44,3 +44,18 @@ certificate material stay in ignored directories.
   runtime and run in the superproject's opt-in `e2e` job, not the static gate.
 - CI (`.github/workflows/ci.yml`) runs the validation gate on every push/PR to
   `main`.
+
+## Runtime Requirements
+
+PKI is script-based (Bash + OpenSSL) and is **not** a Compose service — its
+`local-ca/` material is mounted into the backend and gateway containers.
+
+| Resource | Footprint |
+| --- | --- |
+| Memory | negligible (short-lived OpenSSL processes) |
+| CPU | negligible (brief spikes during key generation / CSR signing) |
+| Storage | a few MB under `local-ca/` (CA keys, issued certs, runtime PKCS12 stores) |
+
+- Requires `openssl` on the host (or runs inside the mounted container context).
+- Private keys and generated certs stay in ignored directories; only public
+  trust anchors under `local-ca/trust/` are tracked.
