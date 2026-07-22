@@ -90,6 +90,12 @@ issue_cert \
   "clientAuth" \
   "DNS:mobile-smoke-client"
 
+issue_cert \
+  "backend-client" \
+  "backend-client" \
+  "clientAuth" \
+  "DNS:backend-client"
+
 openssl pkcs12 -export \
   -inkey "${runtime_dir}/backend-server.key" \
   -in "${runtime_dir}/backend-server.crt" \
@@ -110,6 +116,30 @@ keytool -importcert -noprompt \
   -alias issuing-ca \
   -file "${issuing_cert}" \
   -keystore "${runtime_dir}/backend-truststore.p12" \
+  -storetype PKCS12 \
+  -storepass "${password}" >/dev/null 2>&1
+
+# Service-client keystore + truststore for the external backend-client (mTLS).
+openssl pkcs12 -export \
+  -inkey "${runtime_dir}/backend-client.key" \
+  -in "${runtime_dir}/backend-client.crt" \
+  -certfile "${issuing_cert}" \
+  -name backend-client \
+  -out "${runtime_dir}/backend-client.p12" \
+  -passout "pass:${password}" >/dev/null 2>&1
+
+rm -f "${runtime_dir}/backend-client-truststore.p12"
+keytool -importcert -noprompt \
+  -alias root-ca \
+  -file "${root_cert}" \
+  -keystore "${runtime_dir}/backend-client-truststore.p12" \
+  -storetype PKCS12 \
+  -storepass "${password}" >/dev/null 2>&1
+
+keytool -importcert -noprompt \
+  -alias issuing-ca \
+  -file "${issuing_cert}" \
+  -keystore "${runtime_dir}/backend-client-truststore.p12" \
   -storetype PKCS12 \
   -storepass "${password}" >/dev/null 2>&1
 
