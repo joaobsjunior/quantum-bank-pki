@@ -63,7 +63,10 @@ issue_cert() {
 
   cat "${leaf_cert_path}" "${issuing_cert}" > "${cert_path}"
 
-  chmod 600 "${key_path}"
+  # Group-readable so the non-root container users (KrakenD uid 1000, the
+  # backend service user) can load the key through the PKI_GID group configured
+  # in infrastructure/.env; never world-readable.
+  chmod 640 "${key_path}"
 }
 
 issue_cert \
@@ -142,6 +145,81 @@ keytool -importcert -noprompt \
   -keystore "${runtime_dir}/backend-client-truststore.p12" \
   -storetype PKCS12 \
   -storepass "${password}" >/dev/null 2>&1
+
+# Keycloak serves the local issuer over TLS with a PKI-issued server
+# certificate so no token, JWK, or issuer metadata ever travels in plaintext.
+issue_cert \
+  "keycloak-server" \
+  "keycloak" \
+  "serverAuth" \
+  "DNS:keycloak,DNS:localhost,IP:127.0.0.1"
+
+openssl pkcs12 -export \
+  -inkey "${runtime_dir}/keycloak-server.key" \
+  -in "${runtime_dir}/keycloak-server.crt" \
+  -certfile "${issuing_cert}" \
+  -name keycloak-server \
+  -out "${runtime_dir}/keycloak-server.p12" \
+  -passout "pass:${password}" >/dev/null 2>&1
+
+# Enrollment fixture for the e2e smoke test: a CSR whose CN is the local
+# Keycloak user id, signed by a throwaway key that stays in the runtime dir.
+smoke_subject="${QUANTUM_BANK_SMOKE_SUBJECT:-00000000-0000-0000-0000-000000000001}"
+if [[ ! -f "${runtime_dir}/mobile-smoke-enroll.key" ]]; then
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${runtime_dir}/mobile-smoke-enroll.key" >/dev/null 2>&1
+  chmod 600 "${runtime_dir}/mobile-smoke-enroll.key"
+fi
+openssl req -new -key "${runtime_dir}/mobile-smoke-enroll.key" -out "${runtime_dir}/mobile-smoke-enroll.csr" \
+  -subj "/CN=${smoke_subject}/O=Quantum Bank/OU=quantum-bank-mobile-client-v1"
+chmod 644 "${runtime_dir}/mobile-smoke-enroll.csr"
+
+# Negative-test fixtures: a client certificate from an untrusted CA, an expired
+# client certificate from the real issuing CA, and a trust anchor from another
+# environment. negative-mtls-tests.sh refuses to run without them so the
+# fail-closed cases can never pass vacuously because a file was missing.
+negative_dir="${ca_dir}/negative"
+mkdir -p "${negative_dir}"
+chmod 700 "${negative_dir}"
+
+if [[ ! -f "${negative_dir}/untrusted-ca.key" ]]; then
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${negative_dir}/untrusted-ca.key" >/dev/null 2>&1
+fi
+openssl req -x509 -new -key "${negative_dir}/untrusted-ca.key" -days 30 -sha256 \
+  -out "${negative_dir}/untrusted-ca.crt" \
+  -subj "/C=BR/O=NotQuantumBank/CN=Untrusted Test CA" >/dev/null 2>&1
+cp "${negative_dir}/untrusted-ca.crt" "${negative_dir}/wrong-environment-ca.crt"
+
+write_ext "untrusted-client" "clientAuth" "DNS:untrusted-client"
+if [[ ! -f "${negative_dir}/untrusted-client.key" ]]; then
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${negative_dir}/untrusted-client.key" >/dev/null 2>&1
+fi
+openssl req -new -key "${negative_dir}/untrusted-client.key" -out "${tmp_dir}/untrusted-client.csr" \
+  -subj "/C=BR/O=NotQuantumBank/CN=untrusted-client"
+openssl x509 -req -in "${tmp_dir}/untrusted-client.csr" \
+  -CA "${negative_dir}/untrusted-ca.crt" -CAkey "${negative_dir}/untrusted-ca.key" -CAcreateserial \
+  -out "${negative_dir}/untrusted-client.crt" -days 30 -sha256 \
+  -extfile "${tmp_dir}/untrusted-client.ext" >/dev/null 2>&1
+
+write_ext "expired-client" "clientAuth" "DNS:expired-client"
+if [[ ! -f "${negative_dir}/expired-client.key" ]]; then
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${negative_dir}/expired-client.key" >/dev/null 2>&1
+fi
+openssl req -new -key "${negative_dir}/expired-client.key" -out "${tmp_dir}/expired-client.csr" \
+  -subj "/C=BR/O=QuantumBank/OU=local/CN=expired-client"
+# OpenSSL 3.0's `x509 -req` cannot backdate, so the expired fixture is issued
+# through `openssl ca` with an explicit validity window in the past.
+(
+  cd "${ca_dir}"
+  touch index.txt
+  [[ -f serial ]] || printf '1000\n' > serial
+  mkdir -p issued
+  openssl ca -batch -config openssl.cnf \
+    -in "${tmp_dir}/expired-client.csr" \
+    -out "${negative_dir}/expired-client.crt" \
+    -startdate 20240101000000Z -enddate 20240102000000Z \
+    -extfile "${tmp_dir}/expired-client.ext" -notext >/dev/null 2>&1
+)
+chmod 600 "${negative_dir}"/*.key
 
 cp "${issuing_cert}" "${runtime_dir}/issuing-ca.crt"
 cp "${root_cert}" "${runtime_dir}/root-ca.crt"

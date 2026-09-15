@@ -10,4 +10,4 @@ local-ca/serial
 local-ca/serial.old
 local-ca/index.txt
 local-ca/index.txt.*
-
+local-ca/negative/
