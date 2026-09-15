@@ -30,5 +30,27 @@ fi
 
 openssl verify -CAfile "${root_cert}" "${issuing_cert}" >/dev/null
 
+# When the private keys are present, the anchors must belong to them; a
+# mismatch means every signature this CA produces would be unverifiable.
+private_dir="${repo_dir}/local-ca/private"
+for pair in "root-ca" "issuing-ca"; do
+  key="${private_dir}/${pair}.key"
+  cert="${trust_dir}/${pair}.crt"
+  if [[ -f "${key}" ]]; then
+    if [[ "$(openssl pkey -in "${key}" -pubout 2>/dev/null)" != "$(openssl x509 -in "${cert}" -noout -pubkey)" ]]; then
+      echo "${pair} private key does not match ${cert}; rerun scripts/bootstrap-local-ca.sh" >&2
+      exit 1
+    fi
+  fi
+done
+
+# CA certificates must never be usable as end-entity TLS certificates.
+for cert in "${root_cert}" "${issuing_cert}"; do
+  if ! openssl x509 -in "${cert}" -noout -ext basicConstraints 2>/dev/null | grep -q "CA:TRUE"; then
+    echo "${cert} is not marked as a CA certificate" >&2
+    exit 1
+  fi
+done
+
 echo "trust-anchors-ok"
 
