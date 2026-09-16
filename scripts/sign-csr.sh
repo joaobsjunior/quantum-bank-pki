@@ -8,6 +8,9 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=lib/openssl-pqc.sh
+source "${script_dir}/lib/openssl-pqc.sh"
+pqc_init "${repo_dir}"
 ca_dir="${repo_dir}/local-ca"
 
 csr_path="$1"
@@ -52,35 +55,28 @@ for required in "${csr_path}" "${ca_dir}/trust/issuing-ca.crt" "${ca_dir}/privat
 done
 
 # Proof of possession: the CSR must be self-signed by the key it certifies.
-if ! openssl req -in "${csr_path}" -noout -verify >/dev/null 2>&1; then
+if ! pqc_openssl req -in "${csr_path}" -noout -verify >/dev/null 2>&1; then
   echo "csr signature verification failed" >&2
   exit 1
 fi
 
-# Key policy: RSA >= 2048 bits or EC curves with >= 256-bit field.
-key_text="$(openssl req -in "${csr_path}" -noout -pubkey 2>/dev/null | openssl pkey -pubin -text -noout 2>/dev/null || true)"
-key_bits="$(printf '%s\n' "${key_text}" | sed -n 's/^\(RSA \)\?Public-Key: (\([0-9]*\) bit)$/\2/p' | head -n1)"
-if [[ -z "${key_bits}" ]]; then
-  echo "unsupported or unreadable csr public key" >&2
-  exit 1
-fi
-if printf '%s\n' "${key_text}" | grep -qi '^modulus:'; then
-  if (( key_bits < 2048 )); then
-    echo "rsa key too small: ${key_bits} bits" >&2
-    exit 1
+# Key policy: post-quantum only. The mobile profile enrolls ML-DSA-65 keys
+# (ML-DSA-87 accepted); RSA, EC, EdDSA and ML-DSA-44 are rejected so no
+# classical or lower-category key can ever obtain a gateway mTLS identity.
+key_algorithm="$(pqc_public_key_algorithm req "${csr_path}" || true)"
+accepted=false
+for candidate in ${QUANTUM_BANK_PQC_ACCEPTED_CSR_ALGORITHMS}; do
+  if [[ "${key_algorithm}" == "${candidate}" ]]; then
+    accepted=true
   fi
-elif printf '%s\n' "${key_text}" | grep -q 'ASN1 OID\|NIST CURVE'; then
-  if (( key_bits < 256 )); then
-    echo "ec key too small: ${key_bits} bits" >&2
-    exit 1
-  fi
-else
-  echo "unsupported csr key algorithm" >&2
+done
+if [[ "${accepted}" != "true" ]]; then
+  echo "unsupported csr key algorithm: ${key_algorithm:-unreadable} (accepted: ${QUANTUM_BANK_PQC_ACCEPTED_CSR_ALGORITHMS})" >&2
   exit 1
 fi
 
 # Subject binding: exactly one CN and it must equal the OAuth2 subject.
-csr_subject="$(openssl req -in "${csr_path}" -noout -subject -nameopt RFC2253,sep_multiline 2>/dev/null || true)"
+csr_subject="$(pqc_openssl req -in "${csr_path}" -noout -subject -nameopt RFC2253,sep_multiline 2>/dev/null || true)"
 csr_cn_count="$(printf '%s\n' "${csr_subject}" | grep -c '^ *CN=' || true)"
 csr_cn="$(printf '%s\n' "${csr_subject}" | sed -n 's/^ *CN=//p' | head -n1)"
 if [[ "${csr_cn_count}" != "1" || "${csr_cn}" != "${oauth2_subject}" ]]; then
@@ -115,8 +111,9 @@ cat "${ca_dir}/profiles/quantum-bank-mobile-client-v1.cnf" > "${ext_file}"
 } >> "${ext_file}"
 
 # Serialize issuance so concurrent handoffs can never reuse a serial number.
+# The issuing CA key is ML-DSA-87, so the leaf signature is ML-DSA-87 as well.
 sign_leaf() {
-  openssl x509 -req \
+  pqc_openssl x509 -req \
     -in "${csr_path}" \
     -CA "${ca_dir}/trust/issuing-ca.crt" \
     -CAkey "${ca_dir}/private/issuing-ca.key" \
@@ -124,7 +121,6 @@ sign_leaf() {
     -CAcreateserial \
     -out "${out_cert_path}" \
     -days 1 \
-    -sha256 \
     -copy_extensions none \
     -extfile "${ext_file}" \
     -extensions v3_client >/dev/null 2>&1
@@ -138,5 +134,9 @@ if command -v flock >/dev/null 2>&1; then
 else
   sign_leaf
 fi
+
+# Never hand back a certificate that is not post-quantum end to end.
+pqc_require_signature_algorithm "${out_cert_path}" "${QUANTUM_BANK_PQC_CA_ALGORITHM}"
+pqc_require_algorithm x509 "${out_cert_path}" "${key_algorithm}"
 
 echo "sign-csr-ok"

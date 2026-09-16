@@ -1,3 +1,5 @@
+# Post-quantum local CA (ML-DSA, FIPS 204). Requires OpenSSL >= 3.5; every
+# script resolves it through scripts/lib/openssl-pqc.sh.
 [ca]
 default_ca = quantum_bank_local_ca
 
@@ -8,7 +10,8 @@ private_key = $dir/private/issuing-ca.key
 database = $dir/index.txt
 serial = $dir/serial
 new_certs_dir = $dir/issued
-default_md = sha256
+# ML-DSA signatures are not built on a separate message digest.
+default_md = default
 policy = quantum_bank_policy
 copy_extensions = copy
 unique_subject = no
@@ -33,3 +36,10 @@ keyUsage = critical, keyCertSign, cRLSign
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always
 
+[v3_client]
+basicConstraints = critical, CA:FALSE
+# ML-DSA keys only sign; keyEncipherment would be meaningless for them.
+keyUsage = critical, digitalSignature
+extendedKeyUsage = clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
