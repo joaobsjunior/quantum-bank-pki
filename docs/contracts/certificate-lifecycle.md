@@ -27,6 +27,22 @@ The PKI owner is responsible for:
 - Local development CA material.
 - Fallback implementation selection.
 
+## Post-Quantum Algorithm Policy
+
+The PKI is post-quantum only (NIST FIPS 204 ML-DSA for every signature that
+authenticates a peer; FIPS 203 ML-KEM, as `X25519MLKEM768`, for every TLS key
+exchange):
+
+- Root and issuing CA keys: ML-DSA-87; every issued certificate is signed with
+  ML-DSA-87.
+- Runtime and mobile leaf keys: ML-DSA-65 (ML-DSA-87 accepted). `keyUsage` is
+  `digitalSignature` only.
+- CSR intake rejects RSA, EC, EdDSA and ML-DSA-44 keys (`csr_key_rejected`).
+- TLS consumers (HAProxy terminators, BCJSSE services) offer and accept only
+  `mldsa65`/`mldsa87` signature schemes and the `X25519MLKEM768` group over
+  TLS 1.3; a classical-only peer never completes a handshake.
+- Tooling: OpenSSL >= 3.5 (host or pinned container); no JDK/`keytool`.
+
 ## Certificate Profiles
 
 The local v1 mobile client certificate profile is

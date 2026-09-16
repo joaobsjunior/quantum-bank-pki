@@ -8,6 +8,10 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=lib/openssl-pqc.sh
+source "${script_dir}/lib/openssl-pqc.sh"
+pqc_init "${repo_dir}"
+
 cert_path="$1"
 revoked_file="${repo_dir}/local-ca/revoked-serials.txt"
 
@@ -16,7 +20,7 @@ if [[ ! -f "${cert_path}" ]]; then
   exit 1
 fi
 
-serial="$(openssl x509 -in "${cert_path}" -noout -serial | cut -d= -f2 | tr '[:lower:]' '[:upper:]')"
+serial="$(pqc_openssl x509 -in "${cert_path}" -noout -serial | cut -d= -f2 | tr '[:lower:]' '[:upper:]')"
 if [[ -z "${serial}" ]]; then
   echo "could not extract certificate serial" >&2
   exit 1
@@ -28,4 +32,3 @@ if ! grep -Fxq "${serial}" "${revoked_file}"; then
 fi
 
 echo "revoke-local-cert-ok"
-

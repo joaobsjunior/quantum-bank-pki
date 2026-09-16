@@ -18,6 +18,10 @@ not issue, renew, revoke, or approve certificates.
 - `csrFingerprint`, supplied by backend in the higher-level adapter contract.
 - Correlation id, supplied by backend in the higher-level adapter contract.
 
+The command verifies the ML-DSA proof of possession, accepts only ML-DSA-65 or
+ML-DSA-87 subject keys, and issues an ML-DSA-87-signed certificate; it needs
+OpenSSL >= 3.5 (the backend runtime image ships it).
+
 The shell command accepts file paths and identity values directly. The backend
 adapter remains shaped like an RPC request so OpenXPKI can replace this local
 command without changing mobile, gateway, or backend contracts.
