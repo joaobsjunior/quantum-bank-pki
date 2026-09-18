@@ -1,5 +1,7 @@
-# quantum-bank-mobile-client-v1: post-quantum mobile client certificate profile.
-# Subject public key: ML-DSA-65 (ML-DSA-87 accepted); issuer signature: ML-DSA-87.
+# quantum-bank-mobile-client-v1: mobile client certificate profile.
+# Post-quantum chain: subject key ML-DSA-65 (ML-DSA-87 accepted), issuer
+# signature ML-DSA-87. Compatibility chain (devices without ML-DSA in their TLS
+# stack): subject key ECDSA P-256, issuer signature ecdsa-with-SHA384.
 [v3_client]
 basicConstraints = critical, CA:FALSE
 keyUsage = critical, digitalSignature

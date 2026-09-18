@@ -1,5 +1,6 @@
-# Post-quantum local CA (ML-DSA, FIPS 204). Requires OpenSSL >= 3.5; every
-# script resolves it through scripts/lib/openssl-pqc.sh.
+# Local CA configuration shared by the post-quantum chain (ML-DSA, FIPS 204)
+# and the ECDSA compatibility chain. Requires OpenSSL >= 3.5; every script
+# resolves it through scripts/lib/openssl-pqc.sh.
 [ca]
 default_ca = quantum_bank_local_ca
 
