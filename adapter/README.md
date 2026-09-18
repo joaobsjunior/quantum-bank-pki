@@ -18,8 +18,11 @@ not issue, renew, revoke, or approve certificates.
 - `csrFingerprint`, supplied by backend in the higher-level adapter contract.
 - Correlation id, supplied by backend in the higher-level adapter contract.
 
-The command verifies the ML-DSA proof of possession, accepts only ML-DSA-65 or
-ML-DSA-87 subject keys, and issues an ML-DSA-87-signed certificate; it needs
+The command verifies the proof of possession, accepts ML-DSA-65, ML-DSA-87
+(post-quantum chain) or ECDSA P-256 (compatibility chain) subject keys, issues
+the certificate under the chain that matches the key family (ML-DSA-87 or
+`ecdsa-with-SHA384` signature) and writes that chain's issuing certificate to
+`<output>.issuer` so the backend returns a homogeneous chain; it needs
 OpenSSL >= 3.5 (the backend runtime image ships it).
 
 The shell command accepts file paths and identity values directly. The backend

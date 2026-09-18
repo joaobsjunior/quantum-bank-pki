@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generates the post-quantum runtime material consumed by the local Compose
-# runtime: ML-DSA-65 server/client leaf certificates signed by the ML-DSA-87
-# issuing CA, PEM bundles for the HAProxy TLS terminators, PKCS#12 stores for
-# the JVM services (built with OpenSSL, no JDK needed), the smoke-test
-# enrollment fixture and the negative-test fixtures.
+# Generates the runtime material consumed by the local Compose runtime:
+#   * post-quantum chain: ML-DSA-65 server/client leaf certificates signed by
+#     the ML-DSA-87 issuing CA (every hop), PKCS#12 stores for the JVM
+#     services (built with OpenSSL, no JDK needed);
+#   * compatibility chain: ECDSA P-256 server certificates for the app-facing
+#     listeners (gateway, issuer) signed by the ECDSA P-384 issuing CA, plus
+#     the ECDSA smoke client that plays the Dart/BoringSSL mobile role;
+#   * PEM bundles for the HAProxy terminators, the union trust bundles, the
+#     smoke-test enrollment fixtures (one per key family) and the negative
+#     fixtures.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd "${script_dir}/.." && pwd)"
@@ -19,13 +24,20 @@ tmp_dir="${ca_dir}/tmp/runtime"
 password="${QUANTUM_BANK_RUNTIME_KEYSTORE_PASSWORD:-changeit}"
 leaf_algorithm="${QUANTUM_BANK_PQC_LEAF_ALGORITHM}"
 ca_algorithm="${QUANTUM_BANK_PQC_CA_ALGORITHM}"
+compat_leaf_curve="${QUANTUM_BANK_COMPAT_LEAF_CURVE}"
+compat_leaf_family="${QUANTUM_BANK_COMPAT_LEAF_FAMILY}"
+compat_ca_family="${QUANTUM_BANK_COMPAT_CA_FAMILY}"
 
 issuing_cert="${ca_dir}/trust/issuing-ca.crt"
 issuing_key="${ca_dir}/private/issuing-ca.key"
 root_cert="${ca_dir}/trust/root-ca.crt"
+compat_issuing_cert="${ca_dir}/trust/issuing-ca-compat.crt"
+compat_issuing_key="${ca_dir}/private/issuing-ca-compat.key"
+compat_root_cert="${ca_dir}/trust/root-ca-compat.crt"
 
-if [[ ! -f "${issuing_cert}" || ! -f "${issuing_key}" ]] ||
-  [[ "$(pqc_public_key_algorithm x509 "${issuing_cert}" || true)" != "${ca_algorithm}" ]]; then
+if [[ ! -f "${issuing_cert}" || ! -f "${issuing_key}" || ! -f "${compat_issuing_cert}" || ! -f "${compat_issuing_key}" ]] ||
+  [[ "$(pqc_public_key_algorithm x509 "${issuing_cert}" || true)" != "${ca_algorithm}" ]] ||
+  [[ "$(pqc_key_family x509 "${compat_issuing_cert}" || true)" != "${compat_ca_family}" ]]; then
   "${script_dir}/bootstrap-local-ca.sh" >/dev/null
 fi
 
@@ -72,12 +84,19 @@ issue_cert() {
   # Group-readable so the non-root container users (HAProxy uid 99, the
   # backend service user) can load the key through the PKI_GID group configured
   # in infrastructure/.env; never world-readable.
-  pqc_ensure_key "${key_path}" "${algorithm}" 640
+  local digest_opt=()
+  if [[ "${algorithm}" == "${compat_leaf_family}" ]]; then
+    pqc_ensure_ec_key "${key_path}" "${compat_leaf_curve}" "${compat_leaf_family}" 640
+    # ECDSA signatures need an explicit digest; ML-DSA has none.
+    digest_opt=(-sha384)
+  else
+    pqc_ensure_key "${key_path}" "${algorithm}" 640
+  fi
 
   pqc_openssl req -new -key "${key_path}" -out "${csr_path}" \
     -subj "/C=BR/O=QuantumBank/OU=local/CN=${common_name}"
 
-  pqc_openssl x509 -req -in "${csr_path}" \
+  pqc_openssl x509 -req -in "${csr_path}" "${digest_opt[@]}" \
     -CA "${ca_cert_path}" -CAkey "${ca_key_path}" -CAcreateserial \
     -out "${leaf_cert_path}" -days 90 \
     -extfile "${ext_path}" >/dev/null 2>&1
@@ -119,6 +138,13 @@ pkcs12_trust_store() {
 cp "${issuing_cert}" "${runtime_dir}/issuing-ca.crt"
 cp "${root_cert}" "${runtime_dir}/root-ca.crt"
 cat "${issuing_cert}" "${root_cert}" > "${runtime_dir}/ca-chain.crt"
+cp "${compat_issuing_cert}" "${runtime_dir}/issuing-ca-compat.crt"
+cp "${compat_root_cert}" "${runtime_dir}/root-ca-compat.crt"
+cat "${compat_issuing_cert}" "${compat_root_cert}" > "${runtime_dir}/ca-chain-compat.crt"
+# Union bundles for the app-facing listeners: they verify client certificates
+# from either chain, and compatibility clients verify servers from either root.
+cat "${runtime_dir}/ca-chain.crt" "${runtime_dir}/ca-chain-compat.crt" > "${runtime_dir}/ca-chain-all.crt"
+cat "${root_cert}" "${compat_root_cert}" > "${runtime_dir}/trust-anchors.crt"
 
 issue_cert \
   "gateway-server" \
@@ -159,6 +185,30 @@ issue_cert \
   "serverAuth" \
   "DNS:keycloak,DNS:localhost,IP:127.0.0.1"
 
+# Compatibility-chain server identities for the app-facing listeners (the
+# HAProxy terminators serve them to peers that do not offer ML-DSA signature
+# schemes) and the ECDSA smoke client that plays the Dart/BoringSSL mobile role.
+issue_cert \
+  "gateway-server-compat" \
+  "localhost" \
+  "serverAuth" \
+  "DNS:localhost,DNS:gateway-bootstrap,DNS:gateway-banking,IP:127.0.0.1" \
+  "${compat_leaf_family}" "${runtime_dir}" "${compat_issuing_cert}" "${compat_issuing_key}"
+
+issue_cert \
+  "keycloak-server-compat" \
+  "keycloak" \
+  "serverAuth" \
+  "DNS:keycloak,DNS:localhost,IP:127.0.0.1" \
+  "${compat_leaf_family}" "${runtime_dir}" "${compat_issuing_cert}" "${compat_issuing_key}"
+
+issue_cert \
+  "mobile-smoke-client-compat" \
+  "mobile-smoke-client-compat" \
+  "clientAuth" \
+  "DNS:mobile-smoke-client-compat" \
+  "${compat_leaf_family}" "${runtime_dir}" "${compat_issuing_cert}" "${compat_issuing_key}"
+
 pkcs12_key_store "backend-server"
 pkcs12_trust_store "backend-truststore"
 
@@ -174,12 +224,20 @@ pqc_openssl req -new -key "${runtime_dir}/mobile-smoke-enroll.key" -out "${runti
   -subj "/CN=${smoke_subject}/O=Quantum Bank/OU=quantum-bank-mobile-client-v1"
 chmod 644 "${runtime_dir}/mobile-smoke-enroll.csr"
 
+# Same fixture for the compatibility path: an ECDSA P-256 CSR, which the PKI
+# issues under the compatibility chain.
+pqc_ensure_ec_key "${runtime_dir}/mobile-smoke-enroll-compat.key" "${compat_leaf_curve}" "${compat_leaf_family}" 600
+pqc_openssl req -new -key "${runtime_dir}/mobile-smoke-enroll-compat.key" -sha256 -out "${runtime_dir}/mobile-smoke-enroll-compat.csr" \
+  -subj "/CN=${smoke_subject}/O=Quantum Bank/OU=quantum-bank-mobile-client-v1"
+chmod 644 "${runtime_dir}/mobile-smoke-enroll-compat.csr"
+
 # Negative-test fixtures: a client certificate from an untrusted CA, an expired
 # client certificate from the real issuing CA, a trust anchor from another
-# environment, and two certificates the real CA signed for keys the
-# post-quantum policy forbids at the TLS layer (classical RSA and the lower
-# ML-DSA-44 category). negative-mtls-tests.sh refuses to run without them so
-# the fail-closed cases can never pass vacuously because a file was missing.
+# environment, two certificates the real CA signed for keys the policy forbids
+# at the TLS layer (classical RSA and the lower ML-DSA-44 category) and an
+# ECDSA client certificate from an untrusted compatibility CA.
+# negative-mtls-tests.sh refuses to run without them so the fail-closed cases
+# can never pass vacuously because a file was missing.
 negative_dir="${ca_dir}/negative"
 mkdir -p "${negative_dir}"
 chmod 700 "${negative_dir}"
@@ -196,6 +254,14 @@ issue_cert "untrusted-client" "untrusted-client" "clientAuth" "DNS:untrusted-cli
 
 issue_cert "classical-client" "classical-client" "clientAuth" "DNS:classical-client" \
   "RSA" "${negative_dir}"
+
+pqc_ensure_ec_key "${negative_dir}/untrusted-compat-ca.key" "${QUANTUM_BANK_COMPAT_CA_CURVE}" "${compat_ca_family}" 600
+pqc_openssl req -x509 -new -key "${negative_dir}/untrusted-compat-ca.key" -sha384 -days 30 \
+  -out "${negative_dir}/untrusted-compat-ca.crt" \
+  -subj "/C=BR/O=NotQuantumBank/CN=Untrusted Compat Test CA" \
+  -config "${ca_dir}/openssl.cnf" -extensions root_ca >/dev/null 2>&1
+issue_cert "untrusted-compat-client" "untrusted-compat-client" "clientAuth" "DNS:untrusted-compat-client" \
+  "${compat_leaf_family}" "${negative_dir}" "${negative_dir}/untrusted-compat-ca.crt" "${negative_dir}/untrusted-compat-ca.key"
 
 issue_cert "mldsa44-client" "mldsa44-client" "clientAuth" "DNS:mldsa44-client" \
   "ML-DSA-44" "${negative_dir}"

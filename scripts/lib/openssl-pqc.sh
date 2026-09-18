@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 # Shared post-quantum OpenSSL resolution for every PKI script.
 #
-# The Quantum Bank PKI is post-quantum only: CA keys are ML-DSA-87, every leaf
-# key is ML-DSA-65, and the TLS runtime negotiates X25519MLKEM768 with ML-DSA
-# signature schemes. Native ML-DSA (FIPS 204) support requires OpenSSL >= 3.5,
-# so this library resolves such a binary once and exposes `pqc_openssl`:
+# The Quantum Bank PKI runs two trust chains side by side:
+#
+#   * post-quantum chain: ML-DSA-87 CA keys, ML-DSA-65 leaf keys, used on
+#     every hop where both peers speak ML-DSA (services, gateway egress, PQ
+#     capable clients);
+#   * compatibility chain: ECDSA P-384 CA keys, ECDSA P-256 leaf keys, used
+#     only by the app-facing listeners for peers whose TLS stack cannot yet
+#     verify ML-DSA (the Dart/BoringSSL mobile transport, browsers).
+#
+# Every TLS hop negotiates the X25519MLKEM768 hybrid key exchange (FIPS 203);
+# the app-facing listeners additionally accept X25519 for clients that do not
+# offer the hybrid group yet. Native ML-DSA (FIPS 204) support requires
+# OpenSSL >= 3.5, so this library resolves such a binary once and exposes
+# `pqc_openssl`:
 #
 #   - the host `openssl` when it is >= 3.5 (for example inside the backend
 #     runtime image, or on an up-to-date workstation);
@@ -20,11 +30,24 @@ QUANTUM_BANK_PQC_OPENSSL_MIN_MINOR=5
 QUANTUM_BANK_PQC_OPENSSL_IMAGE="${QUANTUM_BANK_PQC_OPENSSL_IMAGE:-alpine/openssl:3.5.8}"
 
 # Algorithm policy shared by every layer (see docs/contracts/certificate-lifecycle.md).
+# Post-quantum chain (strict hops and PQ-capable clients).
 QUANTUM_BANK_PQC_CA_ALGORITHM="ML-DSA-87"
 QUANTUM_BANK_PQC_LEAF_ALGORITHM="ML-DSA-65"
-QUANTUM_BANK_PQC_ACCEPTED_CSR_ALGORITHMS="ML-DSA-65 ML-DSA-87"
 QUANTUM_BANK_PQC_TLS_GROUPS="X25519MLKEM768"
 QUANTUM_BANK_PQC_TLS_SIGALGS="mldsa65:mldsa87"
+# Compatibility chain (app-facing listeners only). Key families are named by
+# the canonical names pqc_key_family prints: ECDSA-P384 CA, ECDSA-P256 leaves.
+QUANTUM_BANK_COMPAT_CA_CURVE="P-384"
+QUANTUM_BANK_COMPAT_CA_FAMILY="ECDSA-P384"
+QUANTUM_BANK_COMPAT_CA_SIGNATURE="ecdsa-with-SHA384"
+QUANTUM_BANK_COMPAT_LEAF_CURVE="P-256"
+QUANTUM_BANK_COMPAT_LEAF_FAMILY="ECDSA-P256"
+QUANTUM_BANK_COMPAT_TLS_GROUPS="X25519MLKEM768:X25519"
+QUANTUM_BANK_COMPAT_TLS_SIGALGS="mldsa65:mldsa87:ecdsa_secp256r1_sha256:ecdsa_secp384r1_sha384"
+# CSR intake for quantum-bank-mobile-client-v1: post-quantum keys are issued
+# under the post-quantum chain, ECDSA-P256 keys under the compatibility chain.
+QUANTUM_BANK_PQC_ACCEPTED_CSR_ALGORITHMS="ML-DSA-65 ML-DSA-87"
+QUANTUM_BANK_COMPAT_ACCEPTED_CSR_FAMILIES="ECDSA-P256"
 
 _pqc_mode=""
 _pqc_host_bin=""
@@ -117,6 +140,76 @@ pqc_signature_algorithm() {
   local text
   text="$(pqc_openssl x509 -in "$1" -noout -text 2>/dev/null)" || return 1
   printf '%s\n' "${text}" | sed -n 's/^ *Signature Algorithm: //p' | head -n1
+}
+
+# Canonical key family of a certificate (x509), request (req) or private key
+# (key): ML-DSA-44/65/87 as printed by OpenSSL, ECDSA-P256/ECDSA-P384 for
+# named-curve EC keys, RSA, or the raw OpenSSL algorithm name otherwise.
+pqc_key_family() {
+  local kind="$1"
+  local file="$2"
+  local text algorithm curve
+  case "${kind}" in
+    x509) text="$(pqc_openssl x509 -in "${file}" -noout -text 2>/dev/null)" || return 1 ;;
+    req) text="$(pqc_openssl req -in "${file}" -noout -text 2>/dev/null)" || return 1 ;;
+    key) text="$(pqc_openssl pkey -in "${file}" -noout -text 2>/dev/null)" || return 1 ;;
+    *) echo "unknown kind ${kind}" >&2; return 1 ;;
+  esac
+  algorithm="$(printf '%s\n' "${text}" | sed -n 's/^ *Public Key Algorithm: //p' | head -n1)"
+  if [[ -z "${algorithm}" ]]; then
+    algorithm="$(printf '%s\n' "${text}" | sed -n 's/^\([A-Za-z0-9-]*\) Private-Key:.*/\1/p' | head -n1)"
+  fi
+  if [[ -z "${algorithm}" ]] && printf '%s\n' "${text}" | grep -q '^ *Private-Key: '; then
+    algorithm="id-ecPublicKey"
+  fi
+  case "${algorithm}" in
+    id-ecPublicKey)
+      curve="$(printf '%s\n' "${text}" | sed -n 's/^ *NIST CURVE: //p' | head -n1)"
+      case "${curve}" in
+        P-256) echo "ECDSA-P256" ;;
+        P-384) echo "ECDSA-P384" ;;
+        P-521) echo "ECDSA-P521" ;;
+        *) echo "EC-${curve:-unknown}" ;;
+      esac
+      ;;
+    rsaEncryption|RSA) echo "RSA" ;;
+    *) echo "${algorithm}" ;;
+  esac
+}
+
+pqc_require_family() {
+  local kind="$1"
+  local file="$2"
+  local expected="$3"
+  local actual
+  actual="$(pqc_key_family "${kind}" "${file}")"
+  if [[ "${actual}" != "${expected}" ]]; then
+    echo "${file}: key family is '${actual:-unknown}', expected ${expected}" >&2
+    return 1
+  fi
+}
+
+# Ensures a named-curve ECDSA private key exists (compatibility chain). A
+# pre-existing key of another family is moved aside, never silently reused.
+pqc_ensure_ec_key() {
+  local key="$1"
+  local curve="$2"
+  local family="$3"
+  local mode="$4"
+  if [[ -f "${key}" ]]; then
+    local current
+    current="$(pqc_key_family key "${key}" || true)"
+    if [[ "${current}" == "${family}" ]]; then
+      chmod "${mode}" "${key}"
+      return 0
+    fi
+    local legacy="${key}.replaced.$(date +%Y%m%d%H%M%S)"
+    echo "replacing ${key} (${current:-unreadable}) with a fresh ${family} key; previous key kept at ${legacy}" >&2
+    mv "${key}" "${legacy}"
+    chmod 600 "${legacy}"
+  fi
+  pqc_openssl genpkey -algorithm EC -pkeyopt "ec_paramgen_curve:${curve}" -out "${key}" >/dev/null 2>&1
+  chmod "${mode}" "${key}"
 }
 
 pqc_require_algorithm() {

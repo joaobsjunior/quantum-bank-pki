@@ -47,12 +47,10 @@ if [[ "${certificate_profile}" != "quantum-bank-mobile-client-v1" ]]; then
   exit 1
 fi
 
-for required in "${csr_path}" "${ca_dir}/trust/issuing-ca.crt" "${ca_dir}/private/issuing-ca.key"; do
-  if [[ ! -f "${required}" ]]; then
-    echo "missing ${required}" >&2
-    exit 1
-  fi
-done
+if [[ ! -f "${csr_path}" ]]; then
+  echo "missing ${csr_path}" >&2
+  exit 1
+fi
 
 # Proof of possession: the CSR must be self-signed by the key it certifies.
 if ! pqc_openssl req -in "${csr_path}" -noout -verify >/dev/null 2>&1; then
@@ -60,20 +58,49 @@ if ! pqc_openssl req -in "${csr_path}" -noout -verify >/dev/null 2>&1; then
   exit 1
 fi
 
-# Key policy: post-quantum only. The mobile profile enrolls ML-DSA-65 keys
-# (ML-DSA-87 accepted); RSA, EC, EdDSA and ML-DSA-44 are rejected so no
-# classical or lower-category key can ever obtain a gateway mTLS identity.
-key_algorithm="$(pqc_public_key_algorithm req "${csr_path}" || true)"
-accepted=false
+# Key policy. The mobile profile enrolls ML-DSA-65 keys (ML-DSA-87 accepted)
+# under the post-quantum chain, and ECDSA P-256 keys under the compatibility
+# chain for devices whose TLS stack cannot present ML-DSA yet. RSA, EdDSA,
+# other curves and ML-DSA-44 are rejected so no key the terminators refuse at
+# the TLS layer can ever obtain a gateway mTLS identity. The chain is chosen
+# by key family: a leaf is never signed by the other family's CA.
+key_algorithm="$(pqc_key_family req "${csr_path}" || true)"
+chain=""
 for candidate in ${QUANTUM_BANK_PQC_ACCEPTED_CSR_ALGORITHMS}; do
   if [[ "${key_algorithm}" == "${candidate}" ]]; then
-    accepted=true
+    chain="pqc"
   fi
 done
-if [[ "${accepted}" != "true" ]]; then
-  echo "unsupported csr key algorithm: ${key_algorithm:-unreadable} (accepted: ${QUANTUM_BANK_PQC_ACCEPTED_CSR_ALGORITHMS})" >&2
-  exit 1
-fi
+for candidate in ${QUANTUM_BANK_COMPAT_ACCEPTED_CSR_FAMILIES}; do
+  if [[ "${key_algorithm}" == "${candidate}" ]]; then
+    chain="compat"
+  fi
+done
+case "${chain}" in
+  pqc)
+    issuing_cert="${ca_dir}/trust/issuing-ca.crt"
+    issuing_key="${ca_dir}/private/issuing-ca.key"
+    expected_signature="${QUANTUM_BANK_PQC_CA_ALGORITHM}"
+    digest_opt=()
+    ;;
+  compat)
+    issuing_cert="${ca_dir}/trust/issuing-ca-compat.crt"
+    issuing_key="${ca_dir}/private/issuing-ca-compat.key"
+    expected_signature="${QUANTUM_BANK_COMPAT_CA_SIGNATURE}"
+    digest_opt=(-sha384)
+    ;;
+  *)
+    echo "unsupported csr key algorithm: ${key_algorithm:-unreadable} (accepted: ${QUANTUM_BANK_PQC_ACCEPTED_CSR_ALGORITHMS} ${QUANTUM_BANK_COMPAT_ACCEPTED_CSR_FAMILIES})" >&2
+    exit 1
+    ;;
+esac
+
+for required in "${issuing_cert}" "${issuing_key}"; do
+  if [[ ! -f "${required}" ]]; then
+    echo "missing ${required}" >&2
+    exit 1
+  fi
+done
 
 # Subject binding: exactly one CN and it must equal the OAuth2 subject.
 csr_subject="$(pqc_openssl req -in "${csr_path}" -noout -subject -nameopt RFC2253,sep_multiline 2>/dev/null || true)"
@@ -111,13 +138,14 @@ cat "${ca_dir}/profiles/quantum-bank-mobile-client-v1.cnf" > "${ext_file}"
 } >> "${ext_file}"
 
 # Serialize issuance so concurrent handoffs can never reuse a serial number.
-# The issuing CA key is ML-DSA-87, so the leaf signature is ML-DSA-87 as well.
+# The leaf signature follows the chain: ML-DSA-87 for the post-quantum chain,
+# ecdsa-with-SHA384 for the compatibility chain.
 sign_leaf() {
-  pqc_openssl x509 -req \
+  pqc_openssl x509 -req "${digest_opt[@]}" \
     -in "${csr_path}" \
-    -CA "${ca_dir}/trust/issuing-ca.crt" \
-    -CAkey "${ca_dir}/private/issuing-ca.key" \
-    -CAserial "${state_dir}/issuing-ca.srl" \
+    -CA "${issuing_cert}" \
+    -CAkey "${issuing_key}" \
+    -CAserial "${state_dir}/issuing-ca-${chain}.srl" \
     -CAcreateserial \
     -out "${out_cert_path}" \
     -days 1 \
@@ -130,13 +158,19 @@ if command -v flock >/dev/null 2>&1; then
   (
     flock 9
     sign_leaf
-  ) 9>"${state_dir}/issuing-ca.lock"
+  ) 9>"${state_dir}/issuing-ca-${chain}.lock"
 else
   sign_leaf
 fi
 
-# Never hand back a certificate that is not post-quantum end to end.
-pqc_require_signature_algorithm "${out_cert_path}" "${QUANTUM_BANK_PQC_CA_ALGORITHM}"
-pqc_require_algorithm x509 "${out_cert_path}" "${key_algorithm}"
+# Never hand back a certificate whose signature or key family drifted from the
+# chain that was selected for it.
+pqc_require_signature_algorithm "${out_cert_path}" "${expected_signature}"
+pqc_require_family x509 "${out_cert_path}" "${key_algorithm}"
 
-echo "sign-csr-ok"
+# The issuing certificate of the selected chain travels next to the leaf so the
+# caller (backend adapter) can return the right chain without guessing.
+cp "${issuing_cert}" "${out_cert_path}.issuer"
+chmod 644 "${out_cert_path}.issuer"
+
+echo "sign-csr-ok (${chain}: ${key_algorithm}, ${expected_signature})"

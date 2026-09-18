@@ -8,10 +8,15 @@ repo_dir="$(cd "${script_dir}/.." && pwd)"
 banking_url="${BANKING_URL:-https://localhost:8443/statements}"
 bootstrap_url="${BOOTSTRAP_URL:-https://localhost:8080/auth/otk}"
 backend_url="${BACKEND_URL:-https://backend:8080/statements}"
-gateway_ca="${GATEWAY_CA_CERT:-${repo_dir}/local-ca/trust/root-ca.crt}"
+# The app-facing listeners serve a dual identity (ML-DSA or ECDSA, chosen by
+# the client's signature schemes); curl offers ECDSA, so it verifies the
+# gateway against the union of both root anchors. The backend is strict.
+gateway_ca="${GATEWAY_CA_CERT:-${repo_dir}/local-ca/runtime/trust-anchors.crt}"
 backend_ca="${BACKEND_CA_CERT:-${repo_dir}/local-ca/trust/root-ca.crt}"
 untrusted_cert="${UNTRUSTED_CLIENT_CERT:-${repo_dir}/local-ca/negative/untrusted-client.crt}"
 untrusted_key="${UNTRUSTED_CLIENT_KEY:-${repo_dir}/local-ca/negative/untrusted-client.key}"
+untrusted_compat_cert="${UNTRUSTED_COMPAT_CLIENT_CERT:-${repo_dir}/local-ca/negative/untrusted-compat-client.crt}"
+untrusted_compat_key="${UNTRUSTED_COMPAT_CLIENT_KEY:-${repo_dir}/local-ca/negative/untrusted-compat-client.key}"
 expired_cert="${EXPIRED_CLIENT_CERT:-${repo_dir}/local-ca/negative/expired-client.crt}"
 expired_key="${EXPIRED_CLIENT_KEY:-${repo_dir}/local-ca/negative/expired-client.key}"
 classical_cert="${CLASSICAL_CLIENT_CERT:-${repo_dir}/local-ca/negative/classical-client.crt}"
@@ -21,13 +26,17 @@ mldsa44_key="${MLDSA44_CLIENT_KEY:-${repo_dir}/local-ca/negative/mldsa44-client.
 wrong_environment_ca="${WRONG_ENVIRONMENT_CA_CERT:-${repo_dir}/local-ca/negative/wrong-environment-ca.crt}"
 valid_cert="${MOBILE_CLIENT_CERT:-${repo_dir}/local-ca/runtime/mobile-smoke-client.crt}"
 valid_key="${MOBILE_CLIENT_KEY:-${repo_dir}/local-ca/runtime/mobile-smoke-client.key}"
+compat_cert="${COMPAT_MOBILE_CLIENT_CERT:-${repo_dir}/local-ca/runtime/mobile-smoke-client-compat.crt}"
+compat_key="${COMPAT_MOBILE_CLIENT_KEY:-${repo_dir}/local-ca/runtime/mobile-smoke-client-compat.key}"
 
 # The negative fixtures must exist before any case runs. A missing certificate
 # file makes curl fail with a message that could look like a TLS failure, so
 # without this guard every case below could pass vacuously.
 for fixture in "${gateway_ca}" "${backend_ca}" "${untrusted_cert}" "${untrusted_key}" \
+  "${untrusted_compat_cert}" "${untrusted_compat_key}" \
   "${expired_cert}" "${expired_key}" "${classical_cert}" "${classical_key}" \
-  "${mldsa44_cert}" "${mldsa44_key}" "${wrong_environment_ca}" "${valid_cert}" "${valid_key}"; do
+  "${mldsa44_cert}" "${mldsa44_key}" "${wrong_environment_ca}" "${valid_cert}" "${valid_key}" \
+  "${compat_cert}" "${compat_key}"; do
   if [ ! -f "${fixture}" ]; then
     echo "missing negative mTLS fixture: ${fixture}; run scripts/bootstrap-runtime-certs.sh first" >&2
     exit 2
@@ -110,9 +119,11 @@ expect_tls_failure \
   "wrong-environment trust anchor to banking listener" \
   --cacert "${wrong_environment_ca}" "${banking_url}"
 
-# Post-quantum policy at the TLS layer: a certificate the real CA signed for a
+# Transport policy at the TLS layer: a certificate the real CA signed for a
 # classical RSA key, or for the lower ML-DSA-44 category, cannot authenticate
-# because the listeners only accept mldsa65/mldsa87 client signature schemes.
+# because the listeners only accept mldsa65/mldsa87 and ECDSA P-256/P-384
+# client signature schemes. An ECDSA certificate from an untrusted
+# compatibility CA fails chain validation.
 expect_tls_failure \
   "classical RSA client cert (signed by the real CA) to banking listener" \
   --cacert "${gateway_ca}" --cert "${classical_cert}" --key "${classical_key}" "${banking_url}"
@@ -121,20 +132,21 @@ expect_tls_failure \
   "ML-DSA-44 client cert (signed by the real CA) to banking listener" \
   --cacert "${gateway_ca}" --cert "${mldsa44_cert}" --key "${mldsa44_key}" "${banking_url}"
 
-# Post-quantum key exchange is mandatory on every listener: a client that only
-# offers classical groups never completes a handshake, even with valid
-# credentials.
 expect_tls_failure \
-  "classical-only key exchange (X25519) to banking listener" \
-  --cacert "${gateway_ca}" --cert "${valid_cert}" --key "${valid_key}" --curves X25519 "${banking_url}"
+  "ECDSA client cert from an untrusted compatibility CA to banking listener" \
+  --cacert "${gateway_ca}" --cert "${untrusted_compat_cert}" --key "${untrusted_compat_key}" "${banking_url}"
 
-expect_tls_failure \
-  "classical-only key exchange (X25519) to bootstrap listener" \
-  --cacert "${gateway_ca}" --curves X25519 "${bootstrap_url}"
-
+# Post-quantum key exchange is mandatory on every strict hop: a client that
+# only offers classical groups never reaches the backend, even with valid
+# credentials. (The app-facing listeners accept X25519 for compatibility
+# clients; pqc-handshake-tests.sh proves they still prefer the hybrid group.)
 expect_tls_failure \
   "classical-only key exchange (secp256r1) to backend mTLS port" \
   --cacert "${backend_ca}" --curves prime256v1 "${backend_url}"
+
+expect_tls_failure \
+  "classical-only key exchange (X25519) to backend mTLS port" \
+  --cacert "${backend_ca}" --curves X25519 "${backend_url}"
 
 expect_tls_failure \
   "direct backend call without gateway client certificate" \
@@ -147,5 +159,10 @@ expect_tls_failure \
 expect_tls_failure \
   "direct backend call with classical RSA client certificate" \
   --cacert "${backend_ca}" --cert "${classical_cert}" --key "${classical_key}" "${backend_url}"
+
+# The compatibility chain never authenticates a strict hop.
+expect_tls_failure \
+  "direct backend call with ECDSA compatibility client certificate" \
+  --cacert "${backend_ca}" --cert "${compat_cert}" --key "${compat_key}" "${backend_url}"
 
 echo "negative-mtls-ok"

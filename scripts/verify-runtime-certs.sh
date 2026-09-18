@@ -2,9 +2,12 @@
 set -euo pipefail
 
 # Verifies that every runtime artifact produced by bootstrap-runtime-certs.sh
-# honours the post-quantum policy: ML-DSA-65 leaf keys, ML-DSA-87 signatures,
-# chains that validate against the root anchor, OpenSSL-built PKCS#12 stores
-# and the negative fixtures with their intended (forbidden) algorithms.
+# honours the transport policy: ML-DSA-65 leaf keys with ML-DSA-87 signatures
+# on the post-quantum chain, ECDSA P-256 leaf keys with ecdsa-with-SHA384
+# signatures on the compatibility chain (app-facing identities only), chains
+# that validate against their own root anchor and never against the other
+# one, OpenSSL-built PKCS#12 stores (post-quantum only) and the negative
+# fixtures with their intended (forbidden) algorithms.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd "${script_dir}/.." && pwd)"
@@ -17,9 +20,13 @@ runtime_dir="${ca_dir}/runtime"
 negative_dir="${ca_dir}/negative"
 root_cert="${ca_dir}/trust/root-ca.crt"
 issuing_cert="${ca_dir}/trust/issuing-ca.crt"
+compat_root_cert="${ca_dir}/trust/root-ca-compat.crt"
+compat_issuing_cert="${ca_dir}/trust/issuing-ca-compat.crt"
 password="${QUANTUM_BANK_RUNTIME_KEYSTORE_PASSWORD:-changeit}"
 leaf_algorithm="${QUANTUM_BANK_PQC_LEAF_ALGORITHM}"
 ca_algorithm="${QUANTUM_BANK_PQC_CA_ALGORITHM}"
+compat_leaf_family="${QUANTUM_BANK_COMPAT_LEAF_FAMILY}"
+compat_signature="${QUANTUM_BANK_COMPAT_CA_SIGNATURE}"
 
 require_file() {
   if [[ ! -f "$1" ]]; then
@@ -45,6 +52,44 @@ for leaf in gateway-server backend-server gateway-client mobile-smoke-client bac
     exit 1
   fi
 done
+
+# Compatibility-chain identities: only the app-facing server identities and
+# the ECDSA smoke client exist on this chain; no service identity ever does.
+for leaf in gateway-server-compat keycloak-server-compat mobile-smoke-client-compat; do
+  for suffix in crt key pem; do
+    require_file "${runtime_dir}/${leaf}.${suffix}"
+  done
+  pqc_require_family x509 "${runtime_dir}/${leaf}.crt" "${compat_leaf_family}"
+  pqc_require_family key "${runtime_dir}/${leaf}.key" "${compat_leaf_family}"
+  pqc_require_signature_algorithm "${runtime_dir}/${leaf}.crt" "${compat_signature}"
+  pqc_openssl verify -CAfile "${compat_root_cert}" -untrusted "${compat_issuing_cert}" "${runtime_dir}/${leaf}.crt" >/dev/null
+  if pqc_openssl verify -CAfile "${root_cert}" -untrusted "${issuing_cert}" "${runtime_dir}/${leaf}.crt" >/dev/null 2>&1; then
+    echo "${leaf}.crt must not validate against the post-quantum root" >&2
+    exit 1
+  fi
+  if pqc_openssl x509 -in "${runtime_dir}/${leaf}.crt" -noout -ext keyUsage | grep -q "Key Encipherment"; then
+    echo "${leaf}.crt must not advertise keyEncipherment" >&2
+    exit 1
+  fi
+done
+for leaf in backend-server backend-client gateway-client; do
+  if [[ -f "${runtime_dir}/${leaf}-compat.crt" ]]; then
+    echo "${leaf} must not have a compatibility-chain identity (strict hop)" >&2
+    exit 1
+  fi
+done
+
+for bundle in ca-chain-compat.crt ca-chain-all.crt trust-anchors.crt root-ca-compat.crt issuing-ca-compat.crt; do
+  require_file "${runtime_dir}/${bundle}"
+done
+if [[ "$(grep -c 'BEGIN CERTIFICATE' "${runtime_dir}/ca-chain-all.crt")" != "4" ]]; then
+  echo "ca-chain-all.crt must carry the issuing and root anchors of both chains" >&2
+  exit 1
+fi
+if [[ "$(grep -c 'BEGIN CERTIFICATE' "${runtime_dir}/trust-anchors.crt")" != "2" ]]; then
+  echo "trust-anchors.crt must carry exactly the two root anchors" >&2
+  exit 1
+fi
 
 for store in backend-server backend-client; do
   require_file "${runtime_dir}/${store}.p12"
@@ -79,6 +124,9 @@ done
 require_file "${runtime_dir}/mobile-smoke-enroll.csr"
 pqc_require_algorithm req "${runtime_dir}/mobile-smoke-enroll.csr" "${leaf_algorithm}"
 pqc_openssl req -in "${runtime_dir}/mobile-smoke-enroll.csr" -noout -verify >/dev/null 2>&1
+require_file "${runtime_dir}/mobile-smoke-enroll-compat.csr"
+pqc_require_family req "${runtime_dir}/mobile-smoke-enroll-compat.csr" "${compat_leaf_family}"
+pqc_openssl req -in "${runtime_dir}/mobile-smoke-enroll-compat.csr" -noout -verify >/dev/null 2>&1
 
 require_file "${negative_dir}/untrusted-client.crt"
 pqc_require_algorithm x509 "${negative_dir}/untrusted-client.crt" "${leaf_algorithm}"
@@ -96,5 +144,11 @@ if pqc_openssl x509 -in "${negative_dir}/expired-client.crt" -noout -checkend 0 
   exit 1
 fi
 require_file "${negative_dir}/wrong-environment-ca.crt"
+require_file "${negative_dir}/untrusted-compat-client.crt"
+pqc_require_family x509 "${negative_dir}/untrusted-compat-client.crt" "${compat_leaf_family}"
+if pqc_openssl verify -CAfile "${compat_root_cert}" -untrusted "${compat_issuing_cert}" "${negative_dir}/untrusted-compat-client.crt" >/dev/null 2>&1; then
+  echo "untrusted-compat-client.crt must not validate against the compatibility root" >&2
+  exit 1
+fi
 
-echo "runtime-certs-ok (${leaf_algorithm} leaves, ${ca_algorithm} signatures)"
+echo "runtime-certs-ok (${leaf_algorithm}/${ca_algorithm} post-quantum chain, ${compat_leaf_family}/${compat_signature} compatibility chain)"
