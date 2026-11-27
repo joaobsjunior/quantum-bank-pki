@@ -67,7 +67,11 @@ wait_for_endpoint() {
   attempts=0
   while [ "${attempts}" -lt 60 ]; do
     attempts=$((attempts + 1))
-    if printf '' | openssl s_client -connect "${endpoint}" -servername "${endpoint%%:*}" >/dev/null 2>&1; then
+    # Ready once the listener presents its certificate: mTLS listeners abort
+    # the session afterwards (no client certificate here), so the exit code
+    # of s_client says nothing about readiness.
+    if printf '' | openssl s_client -connect "${endpoint}" -servername "${endpoint%%:*}" 2>/dev/null \
+      | grep -q -- '-----BEGIN CERTIFICATE-----'; then
       return 0
     fi
     sleep 2
@@ -121,11 +125,21 @@ expect_session() {
   echo "pqc ok: ${name} (${group}, ${sigalg})"
 }
 
+s_client_linger() {
+  # TLS 1.3 servers reject a client certificate only after the client has
+  # sent its Finished, so keep the session open briefly to read that alert.
+  endpoint="$1"
+  anchor="$2"
+  shift 2
+  sleep 1 | openssl s_client -connect "${endpoint}" -servername "${endpoint%%:*}" -CAfile "${anchor}" \
+    -verify_return_error -tls1_3 "$@" 2>&1 || true
+}
+
 expect_rejected() {
   name="$1"
   endpoint="$2"
   shift 2
-  output="$(s_client "${endpoint}" "${trust_anchor}" "$@")"
+  output="$(s_client_linger "${endpoint}" "${trust_anchor}" "$@")"
   case "${output}" in
     *"Peer signature type:"*)
       case "${output}" in

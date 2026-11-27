@@ -105,7 +105,7 @@ done
 # Subject binding: exactly one CN and it must equal the OAuth2 subject.
 csr_subject="$(pqc_openssl req -in "${csr_path}" -noout -subject -nameopt RFC2253,sep_multiline 2>/dev/null || true)"
 csr_cn_count="$(printf '%s\n' "${csr_subject}" | grep -c '^ *CN=' || true)"
-csr_cn="$(printf '%s\n' "${csr_subject}" | sed -n 's/^ *CN=//p' | head -n1)"
+csr_cn="$(sed -n '/^ *CN=/{s///p;q;}' <<<"${csr_subject}")"
 if [[ "${csr_cn_count}" != "1" || "${csr_cn}" != "${oauth2_subject}" ]]; then
   echo "csr subject CN does not match the authenticated oauth2Subject" >&2
   exit 1
@@ -123,7 +123,7 @@ if ! mkdir -p "${state_dir}" 2>/dev/null || [[ ! -w "${state_dir}" ]]; then
 fi
 chmod 700 "${state_dir}" 2>/dev/null || true
 mkdir -p "$(dirname "${out_cert_path}")"
-ext_file="$(mktemp "${state_dir}/sign-csr-ext.XXXXXX.cnf")"
+ext_file="$(mktemp "${state_dir}/sign-csr-ext.XXXXXX")"
 trap 'rm -f "${ext_file}"' EXIT
 
 cat "${ca_dir}/profiles/quantum-bank-mobile-client-v1.cnf" > "${ext_file}"
@@ -141,7 +141,7 @@ cat "${ca_dir}/profiles/quantum-bank-mobile-client-v1.cnf" > "${ext_file}"
 # The leaf signature follows the chain: ML-DSA-87 for the post-quantum chain,
 # ecdsa-with-SHA384 for the compatibility chain.
 sign_leaf() {
-  pqc_openssl x509 -req "${digest_opt[@]}" \
+  pqc_openssl x509 -req ${digest_opt[@]+"${digest_opt[@]}"} \
     -in "${csr_path}" \
     -CA "${issuing_cert}" \
     -CAkey "${issuing_key}" \
