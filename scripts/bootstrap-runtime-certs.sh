@@ -96,7 +96,7 @@ issue_cert() {
   pqc_openssl req -new -key "${key_path}" -out "${csr_path}" \
     -subj "/C=BR/O=QuantumBank/OU=local/CN=${common_name}"
 
-  pqc_openssl x509 -req -in "${csr_path}" "${digest_opt[@]}" \
+  pqc_openssl x509 -req -in "${csr_path}" ${digest_opt[@]+"${digest_opt[@]}"} \
     -CA "${ca_cert_path}" -CAkey "${ca_key_path}" -CAcreateserial \
     -out "${leaf_cert_path}" -days 90 \
     -extfile "${ext_path}" >/dev/null 2>&1

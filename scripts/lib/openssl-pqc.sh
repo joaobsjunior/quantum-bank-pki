@@ -126,11 +126,11 @@ pqc_public_key_algorithm() {
   local text
   case "${kind}" in
     x509) text="$(pqc_openssl x509 -in "${file}" -noout -text 2>/dev/null)" || return 1
-      printf '%s\n' "${text}" | sed -n 's/^ *Public Key Algorithm: //p' | head -n1 ;;
+      sed -n '/^ *Public Key Algorithm: /{s///p;q;}' <<<"${text}" ;;
     req) text="$(pqc_openssl req -in "${file}" -noout -text 2>/dev/null)" || return 1
-      printf '%s\n' "${text}" | sed -n 's/^ *Public Key Algorithm: //p' | head -n1 ;;
+      sed -n '/^ *Public Key Algorithm: /{s///p;q;}' <<<"${text}" ;;
     key) text="$(pqc_openssl pkey -in "${file}" -noout -text 2>/dev/null)" || return 1
-      printf '%s\n' "${text}" | sed -n 's/^\([A-Za-z0-9-]*\) Private-Key:.*/\1/p' | head -n1 ;;
+      sed -n '/^\([A-Za-z0-9-]*\) Private-Key:.*/{s//\1/p;q;}' <<<"${text}" ;;
     *) echo "unknown kind ${kind}" >&2; return 1 ;;
   esac
 }
@@ -139,7 +139,7 @@ pqc_public_key_algorithm() {
 pqc_signature_algorithm() {
   local text
   text="$(pqc_openssl x509 -in "$1" -noout -text 2>/dev/null)" || return 1
-  printf '%s\n' "${text}" | sed -n 's/^ *Signature Algorithm: //p' | head -n1
+  sed -n '/^ *Signature Algorithm: /{s///p;q;}' <<<"${text}"
 }
 
 # Canonical key family of a certificate (x509), request (req) or private key
@@ -155,16 +155,16 @@ pqc_key_family() {
     key) text="$(pqc_openssl pkey -in "${file}" -noout -text 2>/dev/null)" || return 1 ;;
     *) echo "unknown kind ${kind}" >&2; return 1 ;;
   esac
-  algorithm="$(printf '%s\n' "${text}" | sed -n 's/^ *Public Key Algorithm: //p' | head -n1)"
+  algorithm="$(sed -n '/^ *Public Key Algorithm: /{s///p;q;}' <<<"${text}")"
   if [[ -z "${algorithm}" ]]; then
-    algorithm="$(printf '%s\n' "${text}" | sed -n 's/^\([A-Za-z0-9-]*\) Private-Key:.*/\1/p' | head -n1)"
+    algorithm="$(sed -n '/^\([A-Za-z0-9-]*\) Private-Key:.*/{s//\1/p;q;}' <<<"${text}")"
   fi
   if [[ -z "${algorithm}" ]] && printf '%s\n' "${text}" | grep -q '^ *Private-Key: '; then
     algorithm="id-ecPublicKey"
   fi
   case "${algorithm}" in
     id-ecPublicKey)
-      curve="$(printf '%s\n' "${text}" | sed -n 's/^ *NIST CURVE: //p' | head -n1)"
+      curve="$(sed -n '/^ *NIST CURVE: /{s///p;q;}' <<<"${text}")"
       case "${curve}" in
         P-256) echo "ECDSA-P256" ;;
         P-384) echo "ECDSA-P384" ;;
